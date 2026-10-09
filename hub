@@ -1,0 +1,1023 @@
+-- ==========================================
+-- GGM HUB | ANIME ZERO - V32 (Walk + WP Próximo)
+-- ==========================================
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local VirtualInputManager= game:GetService("VirtualInputManager")
+local UserInputService   = game:GetService("UserInputService")
+local HttpService        = game:GetService("HttpService")
+local PathfindingService = game:GetService("PathfindingService")
+local LocalPlayer = Players.LocalPlayer
+
+getgenv().AutoFarm    = false
+getgenv().AutoBarrier = false
+getgenv().AutoPatrol  = true
+getgenv().AutoSkill1  = false
+getgenv().AutoSkill2  = false
+getgenv().AutoSkill3  = false
+getgenv().AutoUlt     = false
+getgenv().AttackDelay = 0.4
+
+getgenv().EndAction   = "Nada (parar)"
+getgenv().LobbyKey    = "L"
+getgenv().EndDelay    = 2
+
+local hipHeightValue = 2
+local currentTarget  = nil
+local targetType     = nil
+local lastAttack     = 0
+local lastTP         = 0
+local lastAimPos     = nil
+
+local waypoints        = {}
+local currentWpIndex   = 1
+local waypointReached  = false
+
+local selectedConfig    = nil
+local lastConfigName    = ""
+
+local ENEMY_GRACE_TIME = 5
+local Y_DEPTH_LIMIT    = 40
+local TP_STEP_SIZE     = 7   -- passos de 7 em 7 (anti-stuck)
+local TP_NEAR_DIST     = 12
+local WP_REACHED_DIST  = 5
+local ATTACK_MAX_DIST  = 30
+
+local lastPosition     = nil
+local stuckCounter     = 0
+local STUCK_THRESHOLD  = 10  -- mais tolerante porque agora anda
+local lastUnstuck      = 0
+
+local currentPath        = nil
+local currentPathIndex   = 1
+local currentPathTarget  = nil
+local currentPathTime    = 0
+
+local CONFIG_FILE = "GGM_Hub_WP_v3_" .. game.PlaceId .. ".json"
+local INPUT_FLAG  = "GGM_ConfigName"
+local WINDOW_NAME = "GGM HUB | Anime Zero"
+
+-- ==========================================
+-- PERSISTÊNCIA
+-- ==========================================
+local function saveAllConfigs(configs)
+    if not writefile then return false, "writefile indisponível" end
+    local ok, err = pcall(function()
+        writefile(CONFIG_FILE, HttpService:JSONEncode(configs))
+    end)
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+local function loadAllConfigs()
+    if not isfile or not isfile(CONFIG_FILE) then return {} end
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(CONFIG_FILE))
+    end)
+    if not ok or type(data) ~= "table" then return {} end
+    local clean = {}
+    for k, v in pairs(data) do
+        if type(k) == "string" and type(v) == "table" then clean[k] = v end
+    end
+    return clean
+end
+
+local function saveCurrentAsConfig(name)
+    if not name or name == "" then return false, "nome vazio" end
+    local data = {}
+    for _, wp in ipairs(waypoints) do
+        table.insert(data, {wp.X, wp.Y, wp.Z})
+    end
+    local configs = loadAllConfigs()
+    configs[name] = data
+    return saveAllConfigs(configs)
+end
+
+local function loadConfigByName(name)
+    if type(name) ~= "string" then return false, "nome inválido" end
+    local configs = loadAllConfigs()
+    local data = configs[name]
+    if not data or type(data) ~= "table" then return false, "não encontrada" end
+    waypoints = {}
+    for _, v in ipairs(data) do
+        if type(v) == "table" and v[1] and v[2] and v[3] then
+            table.insert(waypoints, Vector3.new(v[1], v[2], v[3]))
+        end
+    end
+    currentWpIndex = 1
+    waypointReached = false
+    currentPath = nil
+    currentPathTarget = nil
+    currentPathIndex = 1
+    return true, #waypoints
+end
+
+local function deleteConfig(name)
+    if type(name) ~= "string" then return false, "nome inválido" end
+    local configs = loadAllConfigs()
+    if not configs[name] then return false, "não existe" end
+    configs[name] = nil
+    return saveAllConfigs(configs)
+end
+
+-- ==========================================
+-- INTERFACE
+-- ==========================================
+local Window = Rayfield:CreateWindow({
+    Name = WINDOW_NAME,
+    LoadingTitle = "GGM HUB",
+    LoadingSubtitle = "Iniciando...",
+    ConfigurationSaving = {Enabled = false},
+    Discord = {Enabled = false},
+    KeySystem = false,
+    Theme = "Amethyst"
+})
+
+local TabCombat = Window:CreateTab("⚔️ Combate", 4483362458)
+local TabWP     = Window:CreateTab("📍 Waypoints", 4483362458)
+local TabMisc   = Window:CreateTab("⚙️ Personagem", 4483345998)
+
+-- ==========================================
+-- HELPERS
+-- ==========================================
+local function getRoot(c) return c and c:FindFirstChild("HumanoidRootPart") end
+local function getHum(c)  return c and c:FindFirstChildOfClass("Humanoid") end
+
+local function teleportTo(targetPos, lookAtPos)
+    if tick() - lastTP < 0.03 then return false end
+    lastTP = tick()
+    local char = LocalPlayer.Character
+    local root = getRoot(char)
+    if not root then return false end
+    root.Anchored = true
+    root.CFrame = CFrame.new(targetPos, lookAtPos)
+    root.Velocity = Vector3.zero
+    root.RotVelocity = Vector3.zero
+    root.Anchored = false
+    return true
+end
+
+-- Encontra o índice do waypoint mais próximo do player
+local function findClosestWpIndex()
+    local root = getRoot(LocalPlayer.Character)
+    if not root or #waypoints == 0 then return 1 end
+    local myPos = root.Position
+    local bestIdx, bestDist = 1, math.huge
+    for i, wp in ipairs(waypoints) do
+        local d = (myPos - wp).Magnitude
+        if d < bestDist then
+            bestIdx, bestDist = i, d
+        end
+    end
+    return bestIdx
+end
+
+-- ==========================================
+-- PATHFINDING
+-- ==========================================
+local function computePath(startPos, endPos)
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 3,
+        AgentHeight = 6,
+        AgentCanJump = true,
+        AgentCanClimb = false,
+        AgentMaxSlope = 45,
+        WaypointSpacing = 7,  -- 🔑 7 studs
+    })
+    local ok = pcall(function()
+        path:ComputeAsync(startPos, endPos)
+    end)
+    if not ok or path.Status ~= Enum.PathStatus.Success then
+        return nil
+    end
+    return path:GetWaypoints()
+end
+
+local function getPath(targetPos)
+    local char = LocalPlayer.Character
+    local root = getRoot(char)
+    if not root then return nil, nil end
+
+    if currentPath and currentPathTarget then
+        if (currentPathTarget - targetPos).Magnitude < 5 and (tick() - currentPathTime) < 2 then
+            return currentPath, currentPathIndex
+        end
+    end
+
+    local wps = computePath(root.Position, targetPos)
+    if not wps or #wps == 0 then return nil, nil end
+
+    currentPath = wps
+    currentPathIndex = 1
+    currentPathTarget = targetPos
+    currentPathTime = tick()
+    return currentPath, currentPathIndex
+end
+
+local function hasObstacle(fromPos, toPos)
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {char}
+    params.IgnoreWater = true
+    for _, h in ipairs({0, 2, 4}) do
+        local o = fromPos + Vector3.new(0, h, 0)
+        local t = toPos   + Vector3.new(0, h, 0)
+        if workspace:Raycast(o, t - o, params) then return true end
+    end
+    return false
+end
+
+-- 🔑 AGORA ANDA em vez de teleportar
+local function stepTeleport(targetPos, stepSize)
+    stepSize = stepSize or TP_STEP_SIZE
+    local char = LocalPlayer.Character
+    local root = getRoot(char)
+    local hum = getHum(char)
+    if not root or not hum then return false end
+    local myPos = root.Position
+
+    local flatTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+    local directDist = (flatTarget - myPos).Magnitude
+
+    -- Detecção de travamento
+    if lastPosition then
+        local moved = (myPos - lastPosition).Magnitude
+        if moved < 0.3 then
+            stuckCounter = stuckCounter + 1
+        else
+            stuckCounter = 0
+        end
+    end
+    lastPosition = myPos
+
+    -- Anti-stuck: se travar, teleporta 7 studs pra frente + sobe um pouco
+    if stuckCounter >= STUCK_THRESHOLD and tick() - lastUnstuck > 2 then
+        lastUnstuck = tick()
+        stuckCounter = 0
+        local dir = (flatTarget - myPos)
+        if dir.Magnitude > 0.1 then
+            dir = dir.Unit
+            local nextPos = myPos + dir * stepSize + Vector3.new(0, 6, 0)
+            teleportTo(nextPos, targetPos)
+        else
+            teleportTo(myPos + Vector3.new(0, 8, 0), targetPos)
+        end
+        return true
+    end
+
+    -- Chegou perto → OK
+    if directDist < 3 then
+        return true
+    end
+
+    -- Sem obstáculo → anda direto
+    if not hasObstacle(myPos, flatTarget) then
+        pcall(function() hum:MoveTo(flatTarget) end)
+        return true
+    end
+
+    -- Com obstáculo → pathfinding
+    local path, idx = getPath(targetPos)
+    if not path then
+        pcall(function() hum:MoveTo(flatTarget) end)
+        return true
+    end
+
+    if idx > #path then
+        currentPath = nil
+        currentPathTarget = nil
+        return false
+    end
+
+    idx = math.clamp(idx, 1, #path)
+    local wp = path[idx]
+    local wpPos = wp.Position
+
+    -- Sanity check
+    local wpToTarget = (Vector3.new(targetPos.X, wpPos.Y, targetPos.Z) - wpPos).Magnitude
+    if wpToTarget > directDist + 8 then
+        currentPath = nil
+        currentPathTarget = nil
+        currentPathIndex = 1
+        pcall(function() hum:MoveTo(flatTarget) end)
+        return true
+    end
+
+    -- Pula waypoints já alcançados
+    while (myPos - wpPos).Magnitude < 3 and idx < #path do
+        idx = idx + 1
+        wp = path[idx]
+        wpPos = wp.Position
+    end
+    currentPathIndex = idx
+
+    pcall(function() hum:MoveTo(wpPos) end)
+    return true
+end
+
+-- ==========================================
+-- CONTADORES / FILTROS
+-- ==========================================
+local function aliveEnemiesCount()
+    local n = 0
+    local char = LocalPlayer.Character
+    local folder = workspace:FindFirstChild("enemies")
+    if folder then
+        for _, v in pairs(folder:GetChildren()) do
+            local hum = getHum(v)
+            if hum and hum.Health > 0 then n = n + 1 end
+        end
+    end
+    if n == 0 then
+        local myRoot = getRoot(char)
+        for _, v in pairs(workspace:GetChildren()) do
+            if v:IsA("Model") and v ~= char and not Players:GetPlayerFromCharacter(v) then
+                local hum = getHum(v)
+                if hum and hum.Health > 0 then
+                    local root = getRoot(v)
+                    if root and myRoot and (myRoot.Position - root.Position).Magnitude < 150 then
+                        n = n + 1
+                    end
+                end
+            end
+        end
+    end
+    return n
+end
+
+local function getBorderAncestor(part)
+    local node = part.Parent
+    while node and node ~= workspace do
+        local n = string.lower(node.Name)
+        if string.find(n, "^border%d") then return node.Name end
+        node = node.Parent
+    end
+    return nil
+end
+
+local function isTooDeep(partPos, myPos)
+    return (myPos.Y - partPos.Y) > Y_DEPTH_LIMIT
+end
+
+local function isBreakableRubble(v)
+    if not (v:IsA("MeshPart") or v:IsA("Part")) then return false end
+    if not v.CanCollide then return false end
+    if v.Transparency >= 0.9 then return false end
+    local n = string.lower(v.Name)
+    if string.find(n, "blocker") then return false end
+    if string.find(n, "navigation") then return false end
+    if not getBorderAncestor(v) then return false end
+    return true
+end
+
+local function findRubbleNear(pos, maxDist)
+    maxDist = maxDist or 40
+    local best, bestD = nil, math.huge
+    for _, v in pairs(workspace:GetDescendants()) do
+        if isBreakableRubble(v) then
+            if not isTooDeep(v.Position, pos) then
+                local d = (pos - v.Position).Magnitude
+                if d < bestD and d < maxDist then
+                    best, bestD = v, d
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- ==========================================
+-- AÇÃO DE FIM
+-- ==========================================
+local function findAndClickButton(patterns)
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return false, "Sem PlayerGui" end
+
+    local candidates = {}
+    for _, gui in pairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled then
+            for _, v in pairs(gui:GetDescendants()) do
+                if (v:IsA("TextButton") or v:IsA("ImageButton")) and v.Visible then
+                    local n = string.lower(v.Name)
+                    local txt = ""
+                    if v:IsA("TextButton") then txt = string.lower(v.Text or "") end
+                    for _, pat in ipairs(patterns) do
+                        if string.find(n, pat) or string.find(txt, pat) then
+                            if v.AbsoluteSize.X > 1 and v.AbsoluteSize.Y > 1 then
+                                table.insert(candidates, v)
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if #candidates == 0 then return false, "Nenhum botão bateu" end
+
+    local btn = candidates[1]
+    for _, c in ipairs(candidates) do
+        if c.AbsoluteSize.Magnitude > btn.AbsoluteSize.Magnitude then btn = c end
+    end
+
+    for _ = 1, 3 do
+        local fired = false
+        pcall(function()
+            if firesignal then
+                firesignal(btn.Activated)
+                fired = true
+            end
+        end)
+        if not fired then
+            local px = btn.AbsolutePosition.X + btn.AbsoluteSize.X / 2
+            local py = btn.AbsolutePosition.Y + btn.AbsoluteSize.Y / 2
+            VirtualInputManager:SendMouseButtonEvent(px, py, 0, true, game, 1)
+            task.wait(0.05)
+            VirtualInputManager:SendMouseButtonEvent(px, py, 0, false, game, 1)
+        end
+        task.wait(0.3)
+    end
+    return true, btn:GetFullName() .. " (" .. #candidates .. ")"
+end
+
+local function handleEndAction()
+    local action = getgenv().EndAction or "Nada (parar)"
+    local delay = getgenv().EndDelay or 2
+
+    task.spawn(function()
+        task.wait(delay)
+        if action == "Voltar ao Lobby" then
+            local ok, where = findAndClickButton({"sair da partida", "sair", "lobby", "exit"})
+            if not ok then
+                local kc = Enum.KeyCode[getgenv().LobbyKey or "L"]
+                if kc then
+                    VirtualInputManager:SendKeyEvent(true, kc, false, game)
+                    task.wait(0.05)
+                    VirtualInputManager:SendKeyEvent(false, kc, false, game)
+                    ok = true; where = "tecla " .. tostring(getgenv().LobbyKey or "L")
+                end
+            end
+            Rayfield:Notify({Title = "Auto Barrier", Content = ok and ("Lobby: " .. where) or ("Falhou: " .. where), Duration = 5, Image = 4483362458})
+        elseif action == "Tentar Novamente" then
+            local ok, where = findAndClickButton({
+                "tentar novamente", "tentar de novo", "novamente", "tentar",
+                "retry", "replay", "regenerar", "restart", "recarregar",
+                "jogar novamente", "play again", "again", "recomecar", "reiniciar"
+            })
+            Rayfield:Notify({Title = "Auto Barrier", Content = ok and ("Tentar Novamente: " .. where) or ("Não achou botão"), Duration = 5, Image = 4483362458})
+        end
+    end)
+end
+
+-- ==========================================
+-- SAFE UI
+-- ==========================================
+local cachedHub = nil
+local function findRayfieldGui()
+    if cachedHub and cachedHub.Parent then return cachedHub end
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    for _, g in pairs(pg:GetChildren()) do
+        if g:IsA("ScreenGui") then
+            for _, c in pairs(g:GetDescendants()) do
+                if c:IsA("TextLabel") and (c.Text == WINDOW_NAME or string.find(c.Text or "", "GGM HUB")) then
+                    cachedHub = g
+                    return g
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function isMouseOverHub()
+    local rg = findRayfieldGui()
+    if not rg or not rg.Enabled then return false end
+    local mloc = UserInputService:GetMouseLocation()
+    for _, v in pairs(rg:GetDescendants()) do
+        if (v:IsA("GuiButton") or v:IsA("TextBox") or v:IsA("ScrollingFrame")) and v.Visible then
+            local p, s = v.AbsolutePosition, v.AbsoluteSize
+            if mloc.X >= p.X and mloc.X <= p.X + s.X
+               and mloc.Y >= p.Y and mloc.Y <= p.Y + s.Y then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function isTyping()
+    return UserInputService:GetFocusedTextBox() ~= nil
+end
+
+local function shouldPauseAttacks()
+    return isTyping() or isMouseOverHub()
+end
+
+local function readConfigNameFromUI()
+    local ok1, v1 = pcall(function()
+        if Rayfield and Rayfield.Flags then return Rayfield.Flags[INPUT_FLAG] end
+    end)
+    if ok1 and type(v1) == "string" and v1 ~= "" then return v1 end
+    local focused = UserInputService:GetFocusedTextBox()
+    if focused and focused.Text and focused.Text ~= "" then return focused.Text end
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then
+        for _, d in pairs(pg:GetDescendants()) do
+            if d:IsA("TextBox") then
+                local ph = d.PlaceholderText or ""
+                if string.find(ph, "Fase1") or string.find(ph, "Config") then
+                    if d.Text and d.Text ~= "" and d.Text ~= ph then return d.Text end
+                end
+            end
+        end
+    end
+    return lastConfigName
+end
+
+-- ==========================================
+-- WAYPOINTS UI
+-- ==========================================
+local ConfigDropdown
+
+local function refreshConfigList()
+    local configs = loadAllConfigs()
+    local names = {}
+    for k, _ in pairs(configs) do
+        if type(k) == "string" then table.insert(names, k) end
+    end
+    table.sort(names)
+    if #names == 0 then names = {"(nenhuma)"} end
+    if ConfigDropdown then ConfigDropdown:Refresh(names, true) end
+end
+
+TabWP:CreateSection("Gravar Waypoints")
+TabWP:CreateParagraph({
+    Title = "Como usar",
+    Content = "1. Vá até cada parede e clique em 'Salvar Posição Atual'.\n2. Digite o nome e aperte ENTER.\n3. Clique em 'Salvar como Config'."
+})
+
+TabWP:CreateButton({
+    Name = "📍 Salvar Posição Atual",
+    Callback = function()
+        local root = getRoot(LocalPlayer.Character)
+        if not root then return end
+        table.insert(waypoints, root.Position)
+        Rayfield:Notify({Title = "Waypoint", Content = "Total: " .. #waypoints, Duration = 2, Image = 4483362458})
+    end,
+})
+
+TabWP:CreateButton({
+    Name = "🗑️ Limpar Waypoints",
+    Callback = function()
+        waypoints = {}; currentWpIndex = 1; waypointReached = false
+        Rayfield:Notify({Title="Waypoints", Content="Sessão limpa!", Duration=2, Image=4483362458})
+    end,
+})
+
+TabWP:CreateSection("Salvar / Carregar")
+TabWP:CreateInput({
+    Name = "Nome da Config (aperte ENTER)",
+    PlaceholderText = "Ex: Fase1 Historia Padrao",
+    RemoveTextAfterFocusLost = false,
+    Flag = INPUT_FLAG,
+    Callback = function(T) lastConfigName = T end,
+})
+
+TabWP:CreateButton({
+    Name = "💾 Salvar como Config",
+    Callback = function()
+        if #waypoints == 0 then
+            Rayfield:Notify({Title="Erro", Content="Nenhum waypoint", Duration=3, Image=4483362458}); return
+        end
+        local name = readConfigNameFromUI()
+        if not name or name == "" then
+            Rayfield:Notify({Title="Erro", Content="Digite o nome e aperte ENTER", Duration=3, Image=4483362458}); return
+        end
+        local ok, err = saveCurrentAsConfig(name)
+        if ok then
+            Rayfield:Notify({Title = "Config salva", Content = "'" .. name .. "' (" .. #waypoints .. ")", Duration = 3, Image = 4483362458})
+            refreshConfigList()
+        else
+            Rayfield:Notify({Title="Erro", Content = tostring(err), Duration=3, Image=4483362458})
+        end
+    end,
+})
+
+ConfigDropdown = TabWP:CreateDropdown({
+    Name = "Configs Salvas",
+    Options = {"(nenhuma)"}, CurrentOption = {"(nenhuma)"}, Flag = "SelectedConfig",
+    Callback = function(Option)
+        if type(Option) == "table" then selectedConfig = Option[1] else selectedConfig = Option end
+    end,
+})
+
+TabWP:CreateButton({
+    Name = "📂 Carregar Config Selecionada",
+    Callback = function()
+        local name = selectedConfig
+        if type(name) == "table" then name = name[1] end
+        if not name or name == "(nenhuma)" then
+            local fb = ConfigDropdown.CurrentOption
+            if type(fb) == "table" then fb = fb[1] end
+            name = fb
+        end
+        if not name or name == "(nenhuma)" then
+            Rayfield:Notify({Title="Erro", Content="Selecione uma config", Duration=3, Image=4483362458}); return
+        end
+        local ok, count = loadConfigByName(name)
+        if ok then
+            Rayfield:Notify({Title = "Carregada", Content = "'" .. name .. "' (" .. count .. ")", Duration = 3, Image = 4483362458})
+        else
+            Rayfield:Notify({Title="Erro", Content = tostring(count), Duration=3, Image=4483362458})
+        end
+    end,
+})
+
+TabWP:CreateButton({
+    Name = "🗑️ Deletar Config Selecionada",
+    Callback = function()
+        local name = selectedConfig
+        if type(name) == "table" then name = name[1] end
+        if not name or name == "(nenhuma)" then return end
+        local ok, err = deleteConfig(name)
+        if ok then
+            Rayfield:Notify({Title="Deletada", Content = "'" .. name .. "'", Duration=3, Image=4483362458})
+            selectedConfig = nil; refreshConfigList()
+        end
+    end,
+})
+
+TabWP:CreateButton({
+    Name = "🔄 Atualizar Lista",
+    Callback = function()
+        refreshConfigList()
+        Rayfield:Notify({Title="Configs", Content="Atualizada", Duration=2, Image=4483362458})
+    end,
+})
+
+-- ==========================================
+-- DETECÇÃO DE ALVOS
+-- ==========================================
+task.spawn(function()
+    while task.wait(0.3) do
+        local char = LocalPlayer.Character
+        local root = getRoot(char)
+        if not root or not (getgenv().AutoFarm or getgenv().AutoBarrier) then
+            currentTarget, targetType = nil, nil
+            continue
+        end
+        local myPos = root.Position
+        local foundEnemy = false
+
+        if getgenv().AutoFarm then
+            local enemiesFolder = workspace:FindFirstChild("enemies")
+            local bestEnemy, bestDist = nil, math.huge
+            local searchIn = enemiesFolder and enemiesFolder:GetChildren() or workspace:GetChildren()
+            for _, v in pairs(searchIn) do
+                if v:IsA("Model") and v ~= char and not Players:GetPlayerFromCharacter(v) then
+                    local vRoot, vHum = getRoot(v), getHum(v)
+                    if vRoot and vHum and vHum.Health > 0 then
+                        if not isTooDeep(vRoot.Position, myPos) then
+                            local d = (myPos - vRoot.Position).Magnitude
+                            if d < bestDist and d < 500 then
+                                bestEnemy, bestDist = vRoot, d
+                            end
+                        end
+                    end
+                end
+            end
+            if bestEnemy then
+                if currentTarget ~= bestEnemy then
+                    currentPath = nil; currentPathTarget = nil; currentPathIndex = 1
+                end
+                currentTarget, targetType = bestEnemy, "Enemy"
+                lastAimPos = bestEnemy.Position
+                foundEnemy = true
+            end
+        end
+        if foundEnemy then continue end
+
+        if getgenv().AutoBarrier and #waypoints > 0 then
+            local enemiesAlive = aliveEnemiesCount()
+            if enemiesAlive == 0 then
+                local wp = waypoints[currentWpIndex]
+                if wp then
+                    local distToWp = (myPos - wp).Magnitude
+                    if not waypointReached and distToWp < WP_REACHED_DIST then
+                        waypointReached = true
+                    end
+                    if waypointReached then
+                        local rubble = findRubbleNear(wp, 40)
+                        if rubble then
+                            if currentTarget ~= rubble then
+                                currentPath = nil; currentPathTarget = nil; currentPathIndex = 1
+                            end
+                            currentTarget, targetType = rubble, "Barrier"
+                            lastAimPos = rubble.Position
+                        else
+                            waypointReached = false
+                            if currentWpIndex >= #waypoints then
+                                -- 🔑 FIM DO LOOP: executa ação e reinicia do waypoint MAIS PRÓXIMO
+                                local action = getgenv().EndAction or "Nada (parar)"
+                                if action ~= "Nada (parar)" then
+                                    Rayfield:Notify({Title = "Auto Barrier", Content = "Waypoints concluídos! Ação: " .. tostring(action), Duration = 5, Image = 4483362458})
+                                    handleEndAction()
+                                end
+                                currentWpIndex = findClosestWpIndex()
+                            else
+                                currentWpIndex = currentWpIndex + 1
+                            end
+                            currentPath = nil; currentPathTarget = nil; currentPathIndex = 1
+                        end
+                    else
+                        if currentTarget ~= wp then
+                            currentPath = nil; currentPathTarget = nil; currentPathIndex = 1
+                        end
+                        currentTarget, targetType = wp, "Waypoint"
+                    end
+                else
+                    currentWpIndex = 1; waypointReached = false
+                    currentTarget, targetType = nil, nil
+                end
+            else
+                if not getgenv().AutoFarm then currentTarget, targetType = nil, nil end
+            end
+        else
+            if not getgenv().AutoFarm then currentTarget, targetType = nil, nil end
+        end
+    end
+end)
+
+-- ==========================================
+-- TP / WALK
+-- ==========================================
+task.spawn(function()
+    while task.wait(0.1) do  -- 🔑 loop um pouco mais lento porque agora anda
+        if not currentTarget then continue end
+        if not (getgenv().AutoFarm or getgenv().AutoBarrier) then continue end
+        local char = LocalPlayer.Character
+        local root, hum = getRoot(char), getHum(char)
+        if not root or not hum or hum.Health <= 0 then continue end
+        local myPos = root.Position
+
+        if targetType == "Enemy" then
+            -- Inimigo: continua TP direto (rápido)
+            if not currentTarget.Parent then continue end
+            local targetPos = currentTarget.Position
+            local desired = currentTarget.CFrame * CFrame.new(0, 0, 2.5)
+            if (myPos - desired.Position).Magnitude > 2 then
+                teleportTo(desired.Position, targetPos)
+            end
+        elseif targetType == "Waypoint" then
+            -- 🔑 Waypoint: ANDA em vez de teleportar
+            stepTeleport(currentTarget, TP_STEP_SIZE)
+        elseif targetType == "Barrier" then
+            if not currentTarget.Parent then continue end
+            local targetPos = currentTarget.Position
+            local distToTarget = (myPos - targetPos).Magnitude
+            if distToTarget > TP_NEAR_DIST then
+                -- Ainda longe da barreira: anda
+                stepTeleport(targetPos, TP_STEP_SIZE)
+            else
+                -- Perto: posiciona
+                local dir = myPos - targetPos
+                if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, 1) else dir = dir.Unit end
+                local idealPos = targetPos + dir * 5
+                if (myPos - idealPos).Magnitude > 2 then
+                    teleportTo(idealPos, targetPos)
+                end
+            end
+        end
+    end
+end)
+
+-- ==========================================
+-- PATROL
+-- ==========================================
+local patrolHome   = nil
+local patrolAngle  = 0
+local patrolRadius = 15
+local lastEnemyPos = nil
+
+task.spawn(function()
+    while task.wait(0.4) do
+        if not (getgenv().AutoFarm or getgenv().AutoBarrier) then
+            patrolHome = nil; patrolAngle = 0; patrolRadius = 15; lastEnemyPos = nil
+            continue
+        end
+        if currentTarget then
+            if targetType == "Enemy" then lastEnemyPos = currentTarget.Position end
+            continue
+        end
+        if not getgenv().AutoPatrol then continue end
+
+        local char = LocalPlayer.Character
+        local root, hum = getRoot(char), getHum(char)
+        if not root or not hum or hum.Health <= 0 then continue end
+        if not patrolHome then patrolHome = root.Position end
+        local base = lastEnemyPos or patrolHome
+        patrolAngle  = patrolAngle + 0.5
+        patrolRadius = patrolRadius + 3
+        if patrolRadius > 200 then patrolRadius = 15 end
+        local px = base.X + math.cos(patrolAngle) * patrolRadius
+        local pz = base.Z + math.sin(patrolAngle) * patrolRadius
+        teleportTo(Vector3.new(px, base.Y, pz), base)
+    end
+end)
+
+-- ==========================================
+-- ATAQUE M1
+-- ==========================================
+local function doAttack(targetPos)
+    local cam = workspace.CurrentCamera
+    local x, y
+    if targetPos then
+        local sp, onScreen = cam:WorldToViewportPoint(targetPos)
+        if onScreen then x, y = sp.X, sp.Y end
+    end
+    if not x or not y then
+        x = cam.ViewportSize.X / 2
+        y = cam.ViewportSize.Y / 2
+    end
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, true,  game, 1)
+    task.wait(0.03)
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+end
+
+task.spawn(function()
+    while task.wait(0.05) do
+        local active = getgenv().AutoFarm
+                    or (getgenv().AutoBarrier and currentTarget)
+        if not active then continue end
+        if targetType == "Waypoint" then continue end
+        if shouldPauseAttacks() then continue end
+
+        local char = LocalPlayer.Character
+        local hum  = getHum(char)
+        if not hum or hum.Health <= 0 then continue end
+
+        local delay = getgenv().AttackDelay or 0.4
+        if tick() - lastAttack < delay then continue end
+
+        local aimPos = nil
+        if currentTarget and currentTarget.Parent then
+            if targetType == "Barrier" then
+                local myRoot = getRoot(char)
+                if myRoot then
+                    local d = (myRoot.Position - currentTarget.Position).Magnitude
+                    if d > ATTACK_MAX_DIST then continue end
+                end
+            end
+            aimPos = currentTarget.Position
+            lastAimPos = aimPos
+        elseif getgenv().AutoFarm and lastAimPos then
+            aimPos = lastAimPos
+        else
+            aimPos = nil
+        end
+
+        lastAttack = tick()
+        doAttack(aimPos)
+    end
+end)
+
+-- ==========================================
+-- SKILLS
+-- ==========================================
+local function pressKey(k)
+    VirtualInputManager:SendKeyEvent(true,  k, false, game)
+    task.wait(0.05)
+    VirtualInputManager:SendKeyEvent(false, k, false, game)
+end
+
+task.spawn(function()
+    while task.wait(0.6) do
+        if targetType ~= "Enemy" or not currentTarget or not currentTarget.Parent then continue end
+        if not getgenv().AutoFarm then continue end
+        if shouldPauseAttacks() then continue end
+        local char = LocalPlayer.Character
+        local hum  = getHum(char)
+        if not hum or hum.Health <= 0 then continue end
+        if getgenv().AutoSkill1 then pressKey(Enum.KeyCode.One)   end
+        if getgenv().AutoSkill2 then pressKey(Enum.KeyCode.Two)   end
+        if getgenv().AutoSkill3 then pressKey(Enum.KeyCode.Three) end
+        if getgenv().AutoUlt    then pressKey(Enum.KeyCode.G)     end
+    end
+end)
+
+-- ==========================================
+-- MENU COMBATE
+-- ==========================================
+TabCombat:CreateSection("Auto Farm")
+TabCombat:CreateToggle({
+    Name = "Auto Farm (TP + Ataque)",
+    CurrentValue = false, Flag = "AutoFarm",
+    Callback = function(V) getgenv().AutoFarm = V end,
+})
+TabCombat:CreateToggle({
+    Name = "Auto Patrol",
+    CurrentValue = true, Flag = "AutoPatrol",
+    Callback = function(V) getgenv().AutoPatrol = V end,
+})
+TabCombat:CreateToggle({
+    Name = "Auto Quebrar Barreira",
+    CurrentValue = false, Flag = "AutoBarrier",
+    Callback = function(V)
+        getgenv().AutoBarrier = V
+        if V and #waypoints == 0 then
+            Rayfield:Notify({Title="Aviso", Content="Sem waypoints!", Duration=4, Image=4483362458})
+        elseif V then
+            currentWpIndex = findClosestWpIndex()  -- 🔑 começa do mais próximo
+            waypointReached = false
+            currentPath = nil
+            currentPathTarget = nil
+            currentPathIndex = 1
+        end
+    end,
+})
+
+TabCombat:CreateSection("⚙️ Ação ao Finalizar Waypoints")
+TabCombat:CreateParagraph({
+    Title = "Comportamento",
+    Content = "Ao terminar, o loop reinicia no WAYPOINT MAIS PRÓXIMO do player. Escolha uma ação extra:"
+})
+TabCombat:CreateDropdown({
+    Name = "Ação extra",
+    Options = {"Nada (parar)", "Voltar ao Lobby", "Tentar Novamente"},
+    CurrentOption = {"Nada (parar)"},
+    Flag = "EndAction",
+    Callback = function(Option)
+        if type(Option) == "table" then getgenv().EndAction = Option[1] else getgenv().EndAction = Option end
+    end,
+})
+TabCombat:CreateInput({
+    Name = "Tecla p/ Lobby (fallback)",
+    PlaceholderText = "Ex: L",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(T) if T and T ~= "" then getgenv().LobbyKey = T end end,
+})
+TabCombat:CreateSlider({
+    Name = "Delay antes de executar (s)",
+    Range = {0, 15}, Increment = 1, Suffix = "s",
+    CurrentValue = 2, Flag = "EndDelay",
+    Callback = function(V) getgenv().EndDelay = V end,
+})
+TabCombat:CreateButton({
+    Name = "🧪 Testar Ação de Fim",
+    Callback = function()
+        handleEndAction()
+        Rayfield:Notify({Title="Teste", Content = "Ação: " .. tostring(getgenv().EndAction), Duration=3, Image=4483362458})
+    end,
+})
+
+TabCombat:CreateSection("Ataque")
+TabCombat:CreateSlider({
+    Name = "Delay do Ataque (ms)",
+    Range = {100, 1000}, Increment = 50, Suffix = "ms",
+    CurrentValue = 400, Flag = "AttackDelay",
+    Callback = function(V) getgenv().AttackDelay = V / 1000 end,
+})
+
+TabCombat:CreateSection("Auto Skills")
+TabCombat:CreateToggle({ Name = "Skill 1 [1]", CurrentValue = false, Flag = "S1",  Callback = function(V) getgenv().AutoSkill1 = V end })
+TabCombat:CreateToggle({ Name = "Skill 2 [2]", CurrentValue = false, Flag = "S2",  Callback = function(V) getgenv().AutoSkill2 = V end })
+TabCombat:CreateToggle({ Name = "Skill 3 [3]", CurrentValue = false, Flag = "S3",  Callback = function(V) getgenv().AutoSkill3 = V end })
+TabCombat:CreateToggle({ Name = "Ultimate [G]", CurrentValue = false, Flag = "Ult", Callback = function(V) getgenv().AutoUlt = V end })
+
+-- ==========================================
+-- MENU PERSONAGEM
+-- ==========================================
+TabMisc:CreateSection("Modificadores")
+TabMisc:CreateInput({
+    Name = "Valor da Altura (HipHeight)",
+    PlaceholderText = "Ex: 5",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(T)
+        local n = tonumber(T)
+        if n then hipHeightValue = n end
+    end,
+})
+TabMisc:CreateButton({
+    Name = "Aplicar Altura",
+    Callback = function()
+        local hum = getHum(LocalPlayer.Character)
+        if hum then
+            hum.HipHeight = hipHeightValue
+            Rayfield:Notify({Title="GGM HUB", Content="Altura: "..hipHeightValue, Duration=2, Image=4483362458})
+        end
+    end,
+})
+
+-- ==========================================
+-- AUTO-LOAD
+-- ==========================================
+task.spawn(function()
+    task.wait(1.5)
+    refreshConfigList()
+end)
