@@ -1,20 +1,6 @@
 -- ==========================================
 -- GGM HUB | ANIME ZERO - V38 (Auto Replay/Lobby EXATO)
 -- ==========================================
--- DESCRIÇÃO
--- Interface Rayfield com abas de Combate, Waypoints e Personagem.
--- Auto Farm procura inimigos vivos e automatiza movimento e ataques.
--- Auto Quebrar Barreira percorre waypoints gravados e procura barreiras.
--- Waypoints podem ser gravados e salvos/carregados como configurações JSON
--- separadas por PlaceId.
--- A ação de fim de partida pode tentar novamente ou voltar ao lobby
--- acionando os botões configurados na tela EndScreen.
--- Também oferece ataque básico, uso automático de habilidades, patrulha,
--- ajuste de WalkSpeed, NoClip e HipHeight.
--- DEPENDÊNCIAS: carrega Rayfield pela internet e usa APIs de executor
--- como getgenv, VirtualInputManager, writefile e readfile; não é destinado
--- ao Roblox Studio padrão.
--- ==========================================
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
