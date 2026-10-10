@@ -4,6 +4,8 @@
 
 O arquivo principal é [`ggmHub.Lua`](https://github.com/ldlar2772/AnimeZero_Macro.lua/blob/main/ggmHub.Lua). Ele cria uma interface Rayfield com três abas: **Combate**, **Waypoints** e **Personagem**.
 
+copia e cola executor: loadstring(game:HttpGet("https://raw.githubusercontent.com/ldlar2772/AnimeZero_Macro.lua/refs/heads/main/ggmHub.Lua"))()
+
 ## Funcionalidades
 
 - **Auto Farm:** procura inimigos vivos e automatiza o movimento até eles e os ataques.
