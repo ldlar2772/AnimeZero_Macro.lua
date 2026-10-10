@@ -1,5 +1,5 @@
 -- ==========================================
--- GGM HUB | ANIME ZERO - V39 (Auto Replay EXATO + SAFE GUI)
+-- GGM HUB | ANIME ZERO - V40 (Bug Fix: Auto Farm + Barrier)
 -- ==========================================
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
@@ -292,11 +292,9 @@ local function getHubFrame()
         for _, gui in pairs(svc:GetChildren()) do
             if gui:IsA("ScreenGui") then
                 for _, desc in ipairs(gui:GetDescendants()) do
-                    -- Encontra o texto do título do menu para identificar a janela
                     if desc:IsA("TextLabel") and string.find(desc.Text or "", "GGM HUB") then
                         local parent = desc.Parent
                         local highestFrame = nil
-                        -- Sobe na hierarquia para encontrar o frame principal do menu
                         while parent and parent ~= gui do
                             if parent:IsA("Frame") then highestFrame = parent end
                             parent = parent.Parent
@@ -323,14 +321,12 @@ local function isMouseOverHub()
     local p = frame.AbsolutePosition
     local s = frame.AbsoluteSize
     
-    -- Verifica se as coordenadas do rato estão em cima da caixa do Hub
     if mloc.X >= p.X and mloc.X <= p.X + s.X and mloc.Y >= p.Y and mloc.Y <= p.Y + s.Y then
         return true
     end
     return false
 end
 
--- Função que junta todas as seguranças para não clicar
 local function isSafeToAttack()
     if isTyping() then return false end
     if isMouseOverHub() then return false end
@@ -572,7 +568,7 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- ATAQUE M1 & SKILLS
+-- ATAQUE M1 & SKILLS (CORRIGIDO PARA WAYPOINTS)
 -- ==========================================
 local function doAttack(targetPos)
     local cam = workspace.CurrentCamera
@@ -589,15 +585,24 @@ end
 task.spawn(function()
     while task.wait(0.05) do
         if not (getgenv().AutoFarm or (getgenv().AutoBarrier and currentTarget)) then continue end
-        
-        -- 🔑 NOVO: Verifica se é seguro atacar (rato fora do menu)
         if not isSafeToAttack() then continue end 
         
         local hum = getHum(LocalPlayer.Character)
         if not hum or hum.Health <= 0 then continue end
         if tick() - lastAttack < (getgenv().AttackDelay or 0.4) then continue end
 
-        local aimPos = (currentTarget and currentTarget.Parent) and currentTarget.Position or lastAimPos
+        -- 🔑 CORREÇÃO AQUI: Verifica de forma segura se o alvo é um Objeto ou um Waypoint
+        local aimPos = lastAimPos
+        if currentTarget then
+            if typeof(currentTarget) == "Instance" and currentTarget.Parent then
+                aimPos = currentTarget.Position
+                lastAimPos = aimPos
+            elseif typeof(currentTarget) == "Vector3" then
+                aimPos = currentTarget
+                lastAimPos = aimPos
+            end
+        end
+
         if aimPos then
             lastAttack = tick()
             doAttack(aimPos)
@@ -612,7 +617,6 @@ end
 
 task.spawn(function()
     while task.wait(0.6) do
-        -- 🔑 NOVO: Verifica se é seguro usar as skills (rato fora do menu)
         if not isSafeToAttack() then continue end
         
         if getgenv().AutoFarm and targetType == "Enemy" and currentTarget then
