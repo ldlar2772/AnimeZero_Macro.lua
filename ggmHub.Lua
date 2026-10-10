@@ -1,5 +1,5 @@
 -- ==========================================
--- GGM HUB | ANIME ZERO - V38 (Auto Replay/Lobby EXATO)
+-- GGM HUB | ANIME ZERO - V39 (Auto Replay EXATO + SAFE GUI)
 -- ==========================================
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
@@ -273,7 +273,69 @@ local function findRubbleNear(pos, maxDist)
     return best
 end
 
+-- ==========================================
+-- SAFE GUI DETECTOR (PAUSA ATAQUE NO MENU)
+-- ==========================================
 local function isTyping() return UserInputService:GetFocusedTextBox() ~= nil end
+
+local cachedHubFrame = nil
+local function getHubFrame()
+    if cachedHubFrame and cachedHubFrame.Parent then return cachedHubFrame end
+    
+    local services = {}
+    pcall(function() table.insert(services, game:GetService("CoreGui")) end)
+    if LocalPlayer:FindFirstChild("PlayerGui") then
+        table.insert(services, LocalPlayer.PlayerGui)
+    end
+    
+    for _, svc in ipairs(services) do
+        for _, gui in pairs(svc:GetChildren()) do
+            if gui:IsA("ScreenGui") then
+                for _, desc in ipairs(gui:GetDescendants()) do
+                    -- Encontra o texto do título do menu para identificar a janela
+                    if desc:IsA("TextLabel") and string.find(desc.Text or "", "GGM HUB") then
+                        local parent = desc.Parent
+                        local highestFrame = nil
+                        -- Sobe na hierarquia para encontrar o frame principal do menu
+                        while parent and parent ~= gui do
+                            if parent:IsA("Frame") then highestFrame = parent end
+                            parent = parent.Parent
+                        end
+                        if highestFrame then
+                            cachedHubFrame = highestFrame
+                            return cachedHubFrame
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function isMouseOverHub()
+    local frame = getHubFrame()
+    if not frame or not frame.Visible then return false end
+    local sg = frame:FindFirstAncestorOfClass("ScreenGui")
+    if sg and not sg.Enabled then return false end
+
+    local mloc = UserInputService:GetMouseLocation()
+    local p = frame.AbsolutePosition
+    local s = frame.AbsoluteSize
+    
+    -- Verifica se as coordenadas do rato estão em cima da caixa do Hub
+    if mloc.X >= p.X and mloc.X <= p.X + s.X and mloc.Y >= p.Y and mloc.Y <= p.Y + s.Y then
+        return true
+    end
+    return false
+end
+
+-- Função que junta todas as seguranças para não clicar
+local function isSafeToAttack()
+    if isTyping() then return false end
+    if isMouseOverHub() then return false end
+    return true
+end
 
 -- ==========================================
 -- AUTO REPLAY / LOBBY (CAMINHO EXATO)
@@ -323,7 +385,6 @@ local function handleEndScreenAction()
                 end
             end
 
-            -- Se achou o botão correto e ele estiver visível na tela, clica nele!
             if targetBtn and targetBtn.Visible then
                 clickDetectedButton(targetBtn)
             end
@@ -527,7 +588,11 @@ end
 
 task.spawn(function()
     while task.wait(0.05) do
-        if not (getgenv().AutoFarm or (getgenv().AutoBarrier and currentTarget)) or isTyping() then continue end
+        if not (getgenv().AutoFarm or (getgenv().AutoBarrier and currentTarget)) then continue end
+        
+        -- 🔑 NOVO: Verifica se é seguro atacar (rato fora do menu)
+        if not isSafeToAttack() then continue end 
+        
         local hum = getHum(LocalPlayer.Character)
         if not hum or hum.Health <= 0 then continue end
         if tick() - lastAttack < (getgenv().AttackDelay or 0.4) then continue end
@@ -547,7 +612,10 @@ end
 
 task.spawn(function()
     while task.wait(0.6) do
-        if getgenv().AutoFarm and targetType == "Enemy" and currentTarget and not isTyping() then
+        -- 🔑 NOVO: Verifica se é seguro usar as skills (rato fora do menu)
+        if not isSafeToAttack() then continue end
+        
+        if getgenv().AutoFarm and targetType == "Enemy" and currentTarget then
             if getgenv().AutoSkill1 then pressKey(Enum.KeyCode.One) end
             if getgenv().AutoSkill2 then pressKey(Enum.KeyCode.Two) end
             if getgenv().AutoSkill3 then pressKey(Enum.KeyCode.Three) end
