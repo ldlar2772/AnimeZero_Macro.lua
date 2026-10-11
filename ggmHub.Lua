@@ -1,5 +1,5 @@
 -- ==========================================
--- GGM HUB | ANIME ZERO - V40 (Bug Fix: Auto Farm + Barrier)
+-- GGM HUB | ANIME ZERO - V41 (Auto Replay + ANTI-AFK)
 -- ==========================================
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
@@ -9,6 +9,7 @@ local RunService         = game:GetService("RunService")
 local VirtualInputManager= game:GetService("VirtualInputManager")
 local UserInputService   = game:GetService("UserInputService")
 local HttpService        = game:GetService("HttpService")
+local VirtualUser        = game:GetService("VirtualUser") -- Adicionado para Anti-AFK
 local LocalPlayer        = Players.LocalPlayer
 
 getgenv().AutoFarm       = false
@@ -22,6 +23,7 @@ getgenv().AttackDelay    = 0.4
 
 getgenv().WalkSpeed      = 16
 getgenv().NoClip         = true
+getgenv().AntiAFK        = true -- Ativado por padrão
 
 getgenv().EndAction      = "Nada (parar)"
 getgenv().WaypointPaused = false
@@ -53,6 +55,17 @@ local STUCK_THRESHOLD  = 10
 local CONFIG_FILE = "GGM_Hub_WP_v3_" .. game.PlaceId .. ".json"
 local INPUT_FLAG  = "GGM_ConfigName"
 local WINDOW_NAME = "GGM HUB | Anime Zero"
+
+-- ==========================================
+-- ANTI-AFK SYSTEM
+-- ==========================================
+LocalPlayer.Idled:Connect(function()
+    if getgenv().AntiAFK then
+        -- Envia um clique direito invisível na câmara para não ser expulso por inatividade
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end
+end)
 
 -- ==========================================
 -- PERSISTÊNCIA
@@ -568,7 +581,7 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- ATAQUE M1 & SKILLS (CORRIGIDO PARA WAYPOINTS)
+-- ATAQUE M1 & SKILLS 
 -- ==========================================
 local function doAttack(targetPos)
     local cam = workspace.CurrentCamera
@@ -591,7 +604,6 @@ task.spawn(function()
         if not hum or hum.Health <= 0 then continue end
         if tick() - lastAttack < (getgenv().AttackDelay or 0.4) then continue end
 
-        -- 🔑 CORREÇÃO AQUI: Verifica de forma segura se o alvo é um Objeto ou um Waypoint
         local aimPos = lastAimPos
         if currentTarget then
             if typeof(currentTarget) == "Instance" and currentTarget.Parent then
@@ -681,6 +693,17 @@ TabCombat:CreateToggle({Name="Skill 1 [1]", CurrentValue=false, Flag="S1", Callb
 TabCombat:CreateToggle({Name="Skill 2 [2]", CurrentValue=false, Flag="S2", Callback=function(V) getgenv().AutoSkill2 = V end})
 TabCombat:CreateToggle({Name="Skill 3 [3]", CurrentValue=false, Flag="S3", Callback=function(V) getgenv().AutoSkill3 = V end})
 TabCombat:CreateToggle({Name="Ultimate [G]", CurrentValue=false, Flag="Ult", Callback=function(V) getgenv().AutoUlt = V end})
+
+-- Nova Aba/Seção para o Anti-AFK e Modificadores Visuais
+TabMisc:CreateSection("Sistemas")
+TabMisc:CreateToggle({
+    Name = "Anti-AFK (Evitar Disconnect)", 
+    CurrentValue = true, 
+    Flag = "AntiAFK", 
+    Callback = function(V) 
+        getgenv().AntiAFK = V 
+    end
+})
 
 TabMisc:CreateSection("Modificadores")
 TabMisc:CreateInput({Name="Valor da Altura (HipHeight)", PlaceholderText="Ex: 5", Callback=function(T) hipHeightValue = tonumber(T) or 2 end})
