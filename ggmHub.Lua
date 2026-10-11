@@ -1,5 +1,5 @@
 -- ==========================================
--- GGM HUB | ANIME ZERO - V41 (Auto Replay + ANTI-AFK)
+-- GGM HUB | ANIME ZERO - V43 (ProximityPrompt Elevador Fix)
 -- ==========================================
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
@@ -9,7 +9,7 @@ local RunService         = game:GetService("RunService")
 local VirtualInputManager= game:GetService("VirtualInputManager")
 local UserInputService   = game:GetService("UserInputService")
 local HttpService        = game:GetService("HttpService")
-local VirtualUser        = game:GetService("VirtualUser") -- Adicionado para Anti-AFK
+local VirtualUser        = game:GetService("VirtualUser")
 local LocalPlayer        = Players.LocalPlayer
 
 getgenv().AutoFarm       = false
@@ -23,7 +23,8 @@ getgenv().AttackDelay    = 0.4
 
 getgenv().WalkSpeed      = 16
 getgenv().NoClip         = true
-getgenv().AntiAFK        = true -- Ativado por padrão
+getgenv().AntiAFK        = true
+getgenv().AutoInteractT  = false
 
 getgenv().EndAction      = "Nada (parar)"
 getgenv().WaypointPaused = false
@@ -61,7 +62,6 @@ local WINDOW_NAME = "GGM HUB | Anime Zero"
 -- ==========================================
 LocalPlayer.Idled:Connect(function()
     if getgenv().AntiAFK then
-        -- Envia um clique direito invisível na câmara para não ser expulso por inatividade
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new())
     end
@@ -287,19 +287,16 @@ local function findRubbleNear(pos, maxDist)
 end
 
 -- ==========================================
--- SAFE GUI DETECTOR (PAUSA ATAQUE NO MENU)
+-- SAFE GUI DETECTOR
 -- ==========================================
 local function isTyping() return UserInputService:GetFocusedTextBox() ~= nil end
 
 local cachedHubFrame = nil
 local function getHubFrame()
     if cachedHubFrame and cachedHubFrame.Parent then return cachedHubFrame end
-    
     local services = {}
     pcall(function() table.insert(services, game:GetService("CoreGui")) end)
-    if LocalPlayer:FindFirstChild("PlayerGui") then
-        table.insert(services, LocalPlayer.PlayerGui)
-    end
+    if LocalPlayer:FindFirstChild("PlayerGui") then table.insert(services, LocalPlayer.PlayerGui) end
     
     for _, svc in ipairs(services) do
         for _, gui in pairs(svc:GetChildren()) do
@@ -347,7 +344,7 @@ local function isSafeToAttack()
 end
 
 -- ==========================================
--- AUTO REPLAY / LOBBY (CAMINHO EXATO)
+-- AUTO REPLAY / LOBBY / NEXT FLOOR
 -- ==========================================
 local function clickDetectedButton(btn)
     for _ = 1, 3 do
@@ -392,6 +389,11 @@ local function handleEndScreenAction()
                 if leaveFolder and leaveFolder:FindFirstChild("Button") then
                     targetBtn = leaveFolder.Button
                 end
+            elseif action == "Próximo Andar" then
+                local nextFolder = buttonsHolder:FindFirstChild("NextButton")
+                if nextFolder and nextFolder:FindFirstChild("Button") then
+                    targetBtn = nextFolder.Button
+                end
             end
 
             if targetBtn and targetBtn.Visible then
@@ -420,6 +422,16 @@ local function refreshConfigList()
     if #names == 0 then names = {"(nenhuma)"} end
     if ConfigDropdown then ConfigDropdown:Refresh(names, true) end
 end
+
+TabWP:CreateSection("Opções de Interação")
+TabWP:CreateToggle({
+    Name = "Interagir c/ Elevadores e Prompts (T)", 
+    CurrentValue = false, 
+    Flag = "AutoInteractT", 
+    Callback = function(V) 
+        getgenv().AutoInteractT = V 
+    end
+})
 
 TabWP:CreateSection("Gravar Waypoints")
 TabWP:CreateButton({
@@ -532,7 +544,25 @@ task.spawn(function()
                     if wp then
                         if not waypointReached and (myPos - wp).Magnitude < WP_REACHED_DIST then
                             waypointReached = true
+                            
+                            -- 🔑 NOVO: Aciona o ProximityPrompt (Elevador) diretamente
+                            if getgenv().AutoInteractT then
+                                for _, prompt in pairs(workspace:GetDescendants()) do
+                                    if prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Parent:IsA("BasePart") then
+                                        if (root.Position - prompt.Parent.Position).Magnitude < 30 then
+                                            if fireproximityprompt then
+                                                fireproximityprompt(prompt)
+                                            else
+                                                prompt:InputHoldBegin()
+                                                task.wait(prompt.HoldDuration or 0)
+                                                prompt:InputHoldEnd()
+                                            end
+                                        end
+                                    end
+                                end
+                            end
                         end
+                        
                         if waypointReached then
                             local rubble = findRubbleNear(wp, 40)
                             if rubble then
@@ -657,7 +687,7 @@ end})
 TabCombat:CreateSection("Ação de Fim de Partida")
 TabCombat:CreateDropdown({
     Name = "Ação ao terminar (Vitória)",
-    Options = {"Nada (parar)", "Voltar ao Lobby", "Tentar Novamente"},
+    Options = {"Nada (parar)", "Voltar ao Lobby", "Tentar Novamente", "Próximo Andar"},
     CurrentOption = {"Nada (parar)"},
     Flag = "EndAction",
     Callback = function(Option)
@@ -694,7 +724,6 @@ TabCombat:CreateToggle({Name="Skill 2 [2]", CurrentValue=false, Flag="S2", Callb
 TabCombat:CreateToggle({Name="Skill 3 [3]", CurrentValue=false, Flag="S3", Callback=function(V) getgenv().AutoSkill3 = V end})
 TabCombat:CreateToggle({Name="Ultimate [G]", CurrentValue=false, Flag="Ult", Callback=function(V) getgenv().AutoUlt = V end})
 
--- Nova Aba/Seção para o Anti-AFK e Modificadores Visuais
 TabMisc:CreateSection("Sistemas")
 TabMisc:CreateToggle({
     Name = "Anti-AFK (Evitar Disconnect)", 
